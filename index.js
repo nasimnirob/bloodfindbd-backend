@@ -1,5 +1,7 @@
+
 const express = require('express');
 const cors = require('cors');
+const SibApiV3Sdk = require('sib-api-v3-sdk');
 require("dotenv").config();
 
 const app = express();
@@ -19,9 +21,46 @@ const client = new MongoClient(uri, {
 app.use(cors());
 app.use(express.json());
 
-// Collections — assigned once the client connects, then reused by every route
+
+// Brevo- sends OTP email.
+
+
+const brevoClient = SibApiV3Sdk.ApiClient.instance;
+const apiKeyAuth = brevoClient.authentications['api-key'];
+apiKeyAuth.apiKey = process.env.BREVO_API_KEY;
+
+const brevoEmailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+
+const sendOtpEmail = async (toEmail, otp) => {
+    const email = new SibApiV3Sdk.SendSmtpEmail();
+
+    // This MUST be an email address you verified in Brevo (Settings > Senders).
+    email.sender = { name: "Blood Find BD", email: process.env.SENDER_EMAIL };
+    email.to = [{ email: toEmail }];
+    email.subject = `${otp} is your Blood Find BD verification code`;
+    email.textContent = `আপনার Blood Find BD verification code: ${otp}\n\nএই কোডটি ৫ মিনিটের জন্য কার্যকর থাকবে। আপনি যদি এই request না করে থাকেন, এই ইমেইলটি উপেক্ষা করুন।`;
+    email.htmlContent = `
+        <div style="font-family: sans-serif; max-width: 420px; margin: auto; padding: 24px; border: 1px solid #eee; border-radius: 12px;">
+            <h2 style="color:#dc2626; margin-bottom: 4px;">Blood Find BD</h2>
+            <p style="color:#333;">আপনার verification code:</p>
+            <div style="font-size: 32px; font-weight: bold; letter-spacing: 8px; color:#111; margin: 12px 0;">${otp}</div>
+            <p style="color:#666; font-size: 14px;">এই কোডটি ৫ মিনিটের জন্য কার্যকর থাকবে।</p>
+            <p style="color:#999; font-size: 12px; margin-top: 20px;">এই request আপনি না করে থাকলে, এই ইমেইলটি উপেক্ষা করুন।</p>
+        </div>
+    `;
+
+    try {
+        await brevoEmailApi.sendTransacEmail(email);
+    } catch (err) {
+        const message = err?.response?.body?.message || err.message || "Failed to send email via Brevo";
+        throw new Error(message);
+    }
+};
+
+// Collections
 let usersCollection;
 let bloodRequestsCollection;
+let otpCollection;
 
 async function run() {
     try {
@@ -30,21 +69,92 @@ async function run() {
         const db = client.db("bloodFindDB");
         usersCollection = db.collection("users");
         bloodRequestsCollection = db.collection("bloodRequests");
+        otpCollection = db.collection("otps");
+
+        // TTL index — MongoDB auto-deletes OTP documents once `expiresAt` passes
+        await otpCollection.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
         await client.db("admin").command({ ping: 1 });
         console.log("Pinged your deployment. You successfully connected to MongoDB!");
 
-        // ---------------------------------------------------------------
-        // USERS
-        // ---------------------------------------------------------------
 
-        // Create a user profile (called right after firebase register)
+        // OTP — email verification during registration
+
+        // Step 1: send a 6-digit OTP to the given email
+        app.post('/send-otp', async (req, res) => {
+            try {
+                const { email } = req.body;
+                if (!email) {
+                    return res.status(400).send({ message: "Email is required" });
+                }
+
+                const existingUser = await usersCollection.findOne({ email });
+                if (existingUser) {
+                    return res.status(409).send({ message: "এই ইমেইল দিয়ে আগেই একাউন্ট আছে" });
+                }
+
+                const otp = Math.floor(100000 + Math.random() * 900000).toString();
+                const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes
+
+                // overwrite any previous pending OTP for this email
+                await otpCollection.updateOne(
+                    { email },
+                    { $set: { email, otp, expiresAt, verified: false } },
+                    { upsert: true }
+                );
+
+                await sendOtpEmail(email, otp);
+
+                res.send({ message: "OTP sent" });
+            } catch (err) {
+                console.error("send-otp error:", err);
+                res.status(500).send({ message: "OTP পাঠাতে সমস্যা হয়েছে" });
+            }
+        });
+
+        // Step 2: verify the OTP the user typed in
+        app.post('/verify-otp', async (req, res) => {
+            try {
+                const { email, otp } = req.body;
+                if (!email || !otp) {
+                    return res.status(400).send({ message: "Email and OTP are required" });
+                }
+
+                const record = await otpCollection.findOne({ email });
+
+                if (!record) {
+                    return res.status(400).send({ message: "কোনো OTP পাওয়া যায়নি, আবার পাঠান" });
+                }
+                if (new Date() > new Date(record.expiresAt)) {
+                    return res.status(400).send({ message: "OTP এর মেয়াদ শেষ, আবার পাঠান" });
+                }
+                if (record.otp !== otp) {
+                    return res.status(400).send({ message: "ভুল OTP" });
+                }
+
+                await otpCollection.updateOne({ email }, { $set: { verified: true } });
+
+                res.send({ message: "OTP verified" });
+            } catch (err) {
+                console.error("verify-otp error:", err);
+                res.status(500).send({ message: "OTP verify করতে সমস্যা হয়েছে" });
+            }
+        });
+
+        
+        // USERS
+
         app.post('/users', async (req, res) => {
             try {
                 const user = req.body;
 
                 if (!user?.email) {
                     return res.status(400).send({ message: "Email is required" });
+                }
+
+                const otpRecord = await otpCollection.findOne({ email: user.email });
+                if (!otpRecord || !otpRecord.verified) {
+                    return res.status(403).send({ message: "Email verify করা হয়নি" });
                 }
 
                 const existing = await usersCollection.findOne({ email: user.email });
@@ -68,6 +178,9 @@ async function run() {
                 };
 
                 const result = await usersCollection.insertOne(newUser);
+
+                await otpCollection.deleteOne({ email: user.email });
+
                 res.status(201).send(result);
             } catch (err) {
                 console.error(err);
@@ -75,7 +188,78 @@ async function run() {
             }
         });
 
-        // Get a single user's profile by email
+
+        app.get('/users', async (req, res) => {
+            try {
+                const user = usersCollection.find()
+                const result = await user.toArray();
+
+
+                if (!user) {
+                    return res.status(404).send({ message: "User not found" });
+                }
+
+                res.send(result);
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to fetch user" });
+            }
+        });
+
+
+        // Create a profile the INSTANT a social (Google) sign-in happens.
+      
+        app.post('/users/social', async (req, res) => {
+            try {
+                const user = req.body;
+
+                if (!user?.email) {
+                    return res.status(400).send({ message: "Email is required" });
+                }
+
+                const existing = await usersCollection.findOne({ email: user.email });
+                if (existing) {
+                    // already exists — nothing to do, this is fine (e.g. duplicate call)
+                    return res.status(200).send(existing);
+                }
+
+                const newUser = {
+                    name: user.name || "",
+                    email: user.email,
+                    phone: "",
+                    bloodGroup: "",
+                    district: "",
+                    area: "",
+                    gender: "",
+                    photoURL: user.photoURL || "",
+                    available: true,
+                    totalDonations: 0,
+                    lastDonation: null,
+                    createdAt: new Date(),
+                };
+
+                const result = await usersCollection.insertOne(newUser);
+                res.status(201).send(result);
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to create user" });
+            }
+        });
+
+
+        // existence check — used right after Google sign-in
+     
+        app.get('/users/:email/exists', async (req, res) => {
+            try {
+                const email = req.params.email;
+                const user = await usersCollection.findOne({ email }, { projection: { _id: 1 } });
+                res.send({ exists: Boolean(user) });
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to check user" });
+            }
+        });
+
         app.get('/users/:email', async (req, res) => {
             try {
                 const email = req.params.email;
@@ -92,13 +276,11 @@ async function run() {
             }
         });
 
-        // Update profile fields (name, phone, bloodGroup, district, area, gender)
         app.patch('/users/:email', async (req, res) => {
             try {
                 const email = req.params.email;
                 const updates = req.body;
 
-                // never allow these to be overwritten through this route
                 delete updates.email;
                 delete updates.totalDonations;
                 delete updates.createdAt;
@@ -119,7 +301,6 @@ async function run() {
             }
         });
 
-        // Toggle donor availability
         app.patch('/users/:email/availability', async (req, res) => {
             try {
                 const email = req.params.email;
@@ -141,7 +322,6 @@ async function run() {
             }
         });
 
-        // Search available donors (blood group / district) — used by "Available Donors" page
         app.get('/donors', async (req, res) => {
             try {
                 const { bloodGroup, district } = req.query;
@@ -162,11 +342,9 @@ async function run() {
             }
         });
 
-        // ---------------------------------------------------------------
+       
         // BLOOD REQUESTS
-        // ---------------------------------------------------------------
-
-        // Create a new blood request ("I Need Blood" form)
+   
         app.post('/blood-requests', async (req, res) => {
             try {
                 const request = req.body;
@@ -186,8 +364,8 @@ async function run() {
                     contactPhone: request.contactPhone,
                     requesterEmail: request.requesterEmail || "",
                     unitsNeeded: Number(request.unitsNeeded) || 1,
-                    urgency: request.urgency || "normal", // "urgent" | "normal"
-                    status: "open", // "open" | "fulfilled" | "cancelled"
+                    urgency: request.urgency || "normal",
+                    status: "open",
                     createdAt: new Date(),
                 };
 
@@ -199,7 +377,6 @@ async function run() {
             }
         });
 
-        // List blood requests (optionally filter by bloodGroup / district / status)
         app.get('/blood-requests', async (req, res) => {
             try {
                 const { bloodGroup, district, status } = req.query;
@@ -221,7 +398,6 @@ async function run() {
             }
         });
 
-        // Single request details
         app.get('/blood-requests/:id', async (req, res) => {
             try {
                 const id = req.params.id;
@@ -243,7 +419,6 @@ async function run() {
             }
         });
 
-        // Update a request's status (fulfilled / cancelled)
         app.patch('/blood-requests/:id/status', async (req, res) => {
             try {
                 const id = req.params.id;
@@ -275,10 +450,6 @@ async function run() {
     } catch (err) {
         console.error("Failed to connect to MongoDB:", err);
     }
-    // NOTE: client.close() is intentionally NOT called here.
-    // The connection must stay open for the lifetime of the server —
-    // closing it right after connecting (as in the original code) would
-    // break every route that touches the database.
 }
 run();
 
@@ -289,68 +460,3 @@ app.get('/', (req, res) => {
 app.listen(port, () => {
     console.log(`Server running on port ${port}`);
 });
-
-
-// const express = require('express');
-// const cors = require('cors');
-// require("dotenv").config();
-
-// const app = express();
-// const port = 5000;
-
-// const { MongoClient, ServerApiVersion } = require('mongodb');
-// const uri = `mongodb+srv://${process.env.DB_USER}:${encodeURIComponent(process.env.DB_PASS)}@cluster0.z4s6olo.mongodb.net/?appName=Cluster0`;
-
-// // Create a MongoClient with a MongoClientOptions object to set the Stable API version
-// const client = new MongoClient(uri, {
-//     serverApi: {
-//         version: ServerApiVersion.v1,
-//         strict: true,
-//         deprecationErrors: true,
-//     }
-// });
-
-// async function run() {
-//     try {
-//         // Connect the client to the server	(optional starting in v4.7)
-//         await client.connect();
-//         // Send a ping to confirm a successful connection
-//         await client.db("admin").command({ ping: 1 });
-//         console.log("Pinged your deployment. You successfully connected to MongoDB!");
-//     } finally {
-//         // Ensures that the client will close when you finish/error
-//         await client.close();
-//     }
-// }
-// run().catch(console.dir);
-
-// app.use(cors());
-// app.use(express.json());
-
-// app.get('/', (req, res) => {
-//     res.send('Blood Find Server Running');
-// });
-
-// app.listen(port, () => {
-//     console.log(`Server running on port ${port}`);
-// });
-
-
-// app.post('/donors', async (req, res) => {
-//     const donor = req.body;
-//     const result = await donorsCollection.insertOne(donor);
-//     res.send(result);
-// });
-
-
-// app.get('/donors/search', async (req, res) => {
-//     const { bloodGroup, district } = req.query;
-
-//     const query = {};
-
-//     if (bloodGroup) query.bloodGroup = bloodGroup;
-//     if (district) query.district = district;
-
-//     const result = await donorsCollection.find(query).toArray();
-//     res.send(result);
-// });
