@@ -1,4 +1,3 @@
-
 const express = require('express');
 const cors = require('cors');
 const SibApiV3Sdk = require('sib-api-v3-sdk');
@@ -21,9 +20,7 @@ const client = new MongoClient(uri, {
 app.use(cors());
 app.use(express.json());
 
-
-// Brevo- sends OTP email.
-
+// brevo - send opt Email
 
 const brevoClient = SibApiV3Sdk.ApiClient.instance;
 const apiKeyAuth = brevoClient.authentications['api-key'];
@@ -80,7 +77,6 @@ async function run() {
 
         // OTP — email verification during registration
 
-        // Step 1: send a 6-digit OTP to the given email
         app.post('/send-otp', async (req, res) => {
             try {
                 const { email } = req.body;
@@ -141,7 +137,7 @@ async function run() {
             }
         });
 
-        
+
         // USERS
 
         app.post('/users', async (req, res) => {
@@ -189,26 +185,8 @@ async function run() {
         });
 
 
-        app.get('/users', async (req, res) => {
-            try {
-                const user = usersCollection.find()
-                const result = await user.toArray();
-
-
-                if (!user) {
-                    return res.status(404).send({ message: "User not found" });
-                }
-
-                res.send(result);
-            } catch (err) {
-                console.error(err);
-                res.status(500).send({ message: "Failed to fetch user" });
-            }
-        });
-
-
         // Create a profile the INSTANT a social (Google) sign-in happens.
-      
+
         app.post('/users/social', async (req, res) => {
             try {
                 const user = req.body;
@@ -246,9 +224,9 @@ async function run() {
             }
         });
 
-
+  
         // existence check — used right after Google sign-in
-     
+
         app.get('/users/:email/exists', async (req, res) => {
             try {
                 const email = req.params.email;
@@ -324,15 +302,28 @@ async function run() {
 
         app.get('/donors', async (req, res) => {
             try {
-                const { bloodGroup, district } = req.query;
+                const { bloodGroup, district, search } = req.query;
 
                 const query = { available: true };
                 if (bloodGroup) query.bloodGroup = bloodGroup;
                 if (district) query.district = district;
 
+                
+                if (search) {
+                    const escaped = search.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+                    const regex = new RegExp(escaped, "i");
+                    query.$or = [
+                        { name: regex },
+                        { district: regex },
+                        { area: regex },
+                        { bloodGroup: regex },
+                    ];
+                }
+
                 const donors = await usersCollection
                     .find(query)
                     .project({ email: 1, name: 1, phone: 1, bloodGroup: 1, district: 1, area: 1, photoURL: 1 })
+                    .limit(50)
                     .toArray();
 
                 res.send(donors);
@@ -342,9 +333,10 @@ async function run() {
             }
         });
 
-       
+
+
         // BLOOD REQUESTS
-   
+
         app.post('/blood-requests', async (req, res) => {
             try {
                 const request = req.body;
