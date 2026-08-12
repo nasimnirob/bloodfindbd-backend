@@ -171,6 +171,7 @@ async function run() {
                     totalDonations: 0,
                     lastDonation: null,
                     createdAt: new Date(),
+                    emailVerified: true,
                 };
 
                 const result = await usersCollection.insertOne(newUser);
