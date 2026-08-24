@@ -225,7 +225,7 @@ async function run() {
             }
         });
 
-  
+
         // existence check — used right after Google sign-in
 
         app.get('/users/:email/exists', async (req, res) => {
@@ -309,7 +309,7 @@ async function run() {
                 if (bloodGroup) query.bloodGroup = bloodGroup;
                 if (district) query.district = district;
 
-                
+
                 if (search) {
                     const escaped = search.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
                     const regex = new RegExp(escaped, "i");
@@ -335,6 +335,49 @@ async function run() {
         });
 
 
+        // user post count
+
+        app.get('/users/:email/post-count', async (req, res) => {
+            try {
+                const email = req.params.email.trim().toLowerCase();
+
+                const count = await bloodRequestsCollection.countDocuments({
+                    requesterEmail: email
+                });
+
+                res.send({ count });
+
+            } catch (err) {
+                console.error("post-count error:", err);
+                res.status(500).send({
+                    message: "Failed to get post count"
+                });
+            }
+        });
+
+
+        app.get('/blood-requests/user/:email', async (req, res) => {
+            try {
+                const email = req.params.email.trim().toLowerCase();
+
+                const posts = await bloodRequestsCollection
+                    .find({
+                        requesterEmail: email
+                    })
+                    .sort({ createdAt: -1 })
+                    .toArray();
+
+                res.send(posts);
+
+            } catch (err) {
+                console.error("user posts error:", err);
+
+                res.status(500).send({
+                    message: "Failed to fetch user posts"
+                });
+            }
+        });
+
 
         // BLOOD REQUESTS
 
@@ -342,7 +385,7 @@ async function run() {
             try {
                 const request = req.body;
 
-                const requiredFields = ["patientName", "bloodGroup", "district", "contactPhone"];
+                const requiredFields = ["patientProblem", "bloodGroup", "contactPhone"];
                 const missing = requiredFields.filter((f) => !request?.[f]);
                 if (missing.length) {
                     return res.status(400).send({ message: `Missing fields: ${missing.join(", ")}` });
@@ -350,14 +393,21 @@ async function run() {
 
                 const newRequest = {
                     patientName: request.patientName,
+                    patientProblem: request.patientProblem,
                     bloodGroup: request.bloodGroup,
                     district: request.district,
                     area: request.area || "",
+                    location: request.location && request.location.lat && request.location.lng
+                        ? { lat: request.location.lat, lng: request.location.lng }
+                        : null,
                     hospital: request.hospital || "",
                     contactPhone: request.contactPhone,
-                    requesterEmail: request.requesterEmail || "",
+                    // requesterEmail: request.requesterEmail || "",
+                    requesterEmail: request.requesterEmail?.trim().toLowerCase() || "",
                     unitsNeeded: Number(request.unitsNeeded) || 1,
                     urgency: request.urgency || "normal",
+                    neededOn: request.neededOn || null,
+                    note: request.note || "",
                     status: "open",
                     createdAt: new Date(),
                 };
@@ -439,6 +489,134 @@ async function run() {
                 res.status(500).send({ message: "Failed to update request" });
             }
         });
+
+
+        // UPDATE USER'S OWN BLOOD REQUEST
+        app.patch('/blood-requests/:id', async (req, res) => {
+            try {
+                const id = req.params.id;
+                const email = req.query.email?.trim().toLowerCase();
+
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).send({
+                        message: "Invalid request id"
+                    });
+                }
+
+                if (!email) {
+                    return res.status(400).send({
+                        message: "User email is required"
+                    });
+                }
+
+                const {
+                    patientName,
+                    patientProblem,
+                    bloodGroup,
+                    district,
+                    area,
+                    location,
+                    hospital,
+                    contactPhone,
+                    unitsNeeded,
+                    urgency,
+                    neededOn,
+                    note
+                } = req.body;
+
+                const updates = {
+                    patientName: patientName || "",
+                    patientProblem: patientProblem || "",
+                    bloodGroup: bloodGroup || "",
+                    district: district || "",
+                    area: area || "",
+                    location: location || null,
+                    hospital: hospital || "",
+                    contactPhone: contactPhone || "",
+                    unitsNeeded: Number(unitsNeeded) || 1,
+                    urgency: urgency || "normal",
+                    neededOn: neededOn || null,
+                    note: note || "",
+                    updatedAt: new Date()
+                };
+
+                const result = await bloodRequestsCollection.updateOne(
+                    {
+                        _id: new ObjectId(id),
+                        requesterEmail: email
+                    },
+                    {
+                        $set: updates
+                    }
+                );
+
+                if (result.matchedCount === 0) {
+                    return res.status(404).send({
+                        message: "Post not found or you are not allowed to edit this post"
+                    });
+                }
+
+                res.send({
+                    message: "Post updated successfully",
+                    modifiedCount: result.modifiedCount
+                });
+
+            } catch (err) {
+                console.error("Update post error:", err);
+
+                res.status(500).send({
+                    message: "Failed to update post"
+                });
+            }
+        });
+
+
+        // DELETE USER'S OWN BLOOD REQUEST
+        app.delete('/blood-requests/:id', async (req, res) => {
+            try {
+                const id = req.params.id;
+                const email = req.query.email?.trim().toLowerCase();
+
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).send({
+                        message: "Invalid request id"
+                    });
+                }
+
+                if (!email) {
+                    return res.status(400).send({
+                        message: "User email is required"
+                    });
+                }
+
+                const result = await bloodRequestsCollection.deleteOne({
+                    _id: new ObjectId(id),
+                    requesterEmail: email
+                });
+
+                if (result.deletedCount === 0) {
+                    return res.status(404).send({
+                        message: "Post not found or you are not allowed to delete this post"
+                    });
+                }
+
+                res.send({
+                    message: "Post deleted successfully",
+                    deletedCount: result.deletedCount
+                });
+
+            } catch (err) {
+                console.error("Delete post error:", err);
+
+                res.status(500).send({
+                    message: "Failed to delete post"
+                });
+            }
+        });
+
+
+
+
 
     } catch (err) {
         console.error("Failed to connect to MongoDB:", err);

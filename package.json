@@ -1,15 +1,23 @@
 {
   "name": "bloodfind-backend",
   "version": "1.0.0",
-  "description": "",
+  "description": "Blood Find BD",
+  "keywords": [],
+  "homepage": "https://github.com/nasimnirob/bloodfindbd-backend#readme",
+  "bugs": {
+    "url": "https://github.com/nasimnirob/bloodfindbd-backend/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nasimnirob/bloodfindbd-backend.git"
+  },
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
   "dependencies": {
     "bcryptjs": "^3.0.3",
     "cookie-parser": "^1.4.7",
@@ -23,5 +31,6 @@
     "pm2": "^7.0.3",
     "resend": "^6.18.1",
     "sib-api-v3-sdk": "^8.5.0"
-  }
+  },
+  "devDependencies": {}
 }
