@@ -164,6 +164,7 @@ async function run() {
                     phone: user.phone || "",
                     bloodGroup: user.bloodGroup || "",
                     district: user.district || "",
+                    role: "user",
                     area: user.area || "",
                     gender: user.gender || "",
                     photoURL: user.photoURL || "",
@@ -208,6 +209,7 @@ async function run() {
                     phone: "",
                     bloodGroup: "",
                     district: "",
+                    role: "user",
                     area: "",
                     gender: "",
                     photoURL: user.photoURL || "",
@@ -377,6 +379,386 @@ async function run() {
                 });
             }
         });
+
+
+        ///////////// ADMIN START ////////////
+
+        app.get('/admin/dashboard', async (req, res) => {
+            try {
+                const [
+                    totalUsers,
+                    totalDonors,
+                    totalRequests,
+                    openRequests,
+                    fulfilledRequests,
+                    cancelledRequests
+                ] = await Promise.all([
+                    usersCollection.countDocuments(),
+
+                    usersCollection.countDocuments({
+                        available: true
+                    }),
+
+                    bloodRequestsCollection.countDocuments(),
+
+                    bloodRequestsCollection.countDocuments({
+                        status: "open"
+                    }),
+
+                    bloodRequestsCollection.countDocuments({
+                        status: "fulfilled"
+                    }),
+
+                    bloodRequestsCollection.countDocuments({
+                        status: "cancelled"
+                    })
+                ]);
+
+                // Blood group statistics
+                const bloodGroupStats = await usersCollection.aggregate([
+                    {
+                        $match: {
+                            available: true,
+                            bloodGroup: { $ne: "" }
+                        }
+                    },
+                    {
+                        $group: {
+                            _id: "$bloodGroup",
+                            count: { $sum: 1 }
+                        }
+                    },
+                    {
+                        $sort: {
+                            count: -1
+                        }
+                    }
+                ]).toArray();
+
+                // District statistics
+                const districtStats = await usersCollection.aggregate([
+                    {
+                        $match: {
+                            district: { $ne: "" }
+                        }
+                    },
+                    {
+                        $group: {
+                            _id: "$district",
+                            count: { $sum: 1 }
+                        }
+                    },
+                    {
+                        $sort: {
+                            count: -1
+                        }
+                    },
+                    {
+                        $limit: 10
+                    }
+                ]).toArray();
+
+                // Recent users
+                const recentUsers = await usersCollection
+                    .find({})
+                    .project({
+                        name: 1,
+                        email: 1,
+                        bloodGroup: 1,
+                        district: 1,
+                        available: 1,
+                        photoURL: 1,
+                        createdAt: 1
+                    })
+                    .sort({
+                        createdAt: -1
+                    })
+                    .limit(5)
+                    .toArray();
+
+                // Recent blood requests
+                const recentRequests = await bloodRequestsCollection
+                    .find({})
+                    .sort({
+                        createdAt: -1
+                    })
+                    .limit(5)
+                    .toArray();
+
+                res.send({
+                    statistics: {
+                        totalUsers,
+                        totalDonors,
+                        totalRequests,
+                        openRequests,
+                        fulfilledRequests,
+                        cancelledRequests
+                    },
+
+                    bloodGroupStats,
+
+                    districtStats,
+
+                    recentUsers,
+
+                    recentRequests
+                });
+
+            } catch (err) {
+                console.error("Dashboard error:", err);
+
+                res.status(500).send({
+                    message: "Failed to load dashboard data"
+                });
+            }
+        });
+
+
+        // ADMIN USER
+
+        app.get('/admin/users', async (req, res) => {
+            try {
+                const { search, bloodGroup, district } = req.query;
+
+                const query = {};
+
+                if (bloodGroup) {
+                    query.bloodGroup = bloodGroup;
+                }
+
+                if (district) {
+                    query.district = district;
+                }
+
+                if (search) {
+                    const regex = new RegExp(
+                        search.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+                        "i"
+                    );
+
+                    query.$or = [
+                        { name: regex },
+                        { email: regex },
+                        { phone: regex },
+                        { district: regex },
+                        { area: regex },
+                        { bloodGroup: regex }
+                    ];
+                }
+
+                const users = await usersCollection
+                    .find(query)
+                    .project({
+                        name: 1,
+                        email: 1,
+                        phone: 1,
+                        bloodGroup: 1,
+                        district: 1,
+                        area: 1,
+                        gender: 1,
+                        photoURL: 1,
+                        available: 1,
+                        totalDonations: 1,
+                        lastDonation: 1,
+                        createdAt: 1,
+                        role: 1
+                    })
+                    .sort({
+                        createdAt: -1
+                    })
+                    .toArray();
+
+                res.send(users);
+
+            } catch (err) {
+                console.error("Admin users error:", err);
+
+                res.status(500).send({
+                    message: "Failed to fetch users"
+                });
+            }
+        });
+
+        // ADMIN USER DELETE
+
+        app.delete('/admin/users/:id', async (req, res) => {
+            try {
+                const id = req.params.id;
+
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).send({
+                        message: "Invalid user id"
+                    });
+                }
+
+                const result = await usersCollection.deleteOne({
+                    _id: new ObjectId(id)
+                });
+
+                if (result.deletedCount === 0) {
+                    return res.status(404).send({
+                        message: "User not found"
+                    });
+                }
+
+                res.send({
+                    message: "User deleted successfully",
+                    deletedCount: result.deletedCount
+                });
+
+            } catch (err) {
+                console.error("Admin delete user error:", err);
+
+                res.status(500).send({
+                    message: "Failed to delete user"
+                });
+            }
+        });
+
+
+        // ADMIN BLOOD REQUEST
+
+        app.get('/admin/blood-requests', async (req, res) => {
+            try {
+                const { search, bloodGroup, district, status } = req.query;
+
+                const query = {};
+
+                if (bloodGroup) {
+                    query.bloodGroup = bloodGroup;
+                }
+
+                if (district) {
+                    query.district = district;
+                }
+
+                if (status) {
+                    query.status = status;
+                }
+
+                if (search) {
+                    const regex = new RegExp(
+                        search.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+                        "i"
+                    );
+
+                    query.$or = [
+                        { patientName: regex },
+                        { patientProblem: regex },
+                        { hospital: regex },
+                        { district: regex },
+                        { area: regex },
+                        { requesterEmail: regex },
+                        { contactPhone: regex }
+                    ];
+                }
+
+                const requests = await bloodRequestsCollection
+                    .find(query)
+                    .sort({
+                        createdAt: -1
+                    })
+                    .toArray();
+
+                res.send(requests);
+
+            } catch (err) {
+                console.error("Admin requests error:", err);
+
+                res.status(500).send({
+                    message: "Failed to fetch blood requests"
+                });
+            }
+        });
+
+
+        // ADMIN REQUEST DELETE
+
+        app.delete('/admin/blood-requests/:id', async (req, res) => {
+            try {
+                const id = req.params.id;
+
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).send({
+                        message: "Invalid request id"
+                    });
+                }
+
+                const result = await bloodRequestsCollection.deleteOne({
+                    _id: new ObjectId(id)
+                });
+
+                if (result.deletedCount === 0) {
+                    return res.status(404).send({
+                        message: "Request not found"
+                    });
+                }
+
+                res.send({
+                    message: "Blood request deleted successfully"
+                });
+
+            } catch (err) {
+                console.error("Admin delete request error:", err);
+
+                res.status(500).send({
+                    message: "Failed to delete request"
+                });
+            }
+        });
+
+
+        // SUPER ADMIN
+
+        app.patch('/admin/users/:id/role', async (req, res) => {
+            try {
+                const id = req.params.id;
+                const { role } = req.body;
+
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).send({
+                        message: "Invalid user id"
+                    });
+                }
+
+                if (!["user", "admin"].includes(role)) {
+                    return res.status(400).send({
+                        message: "Invalid role"
+                    });
+                }
+
+                const result = await usersCollection.updateOne(
+                    {
+                        _id: new ObjectId(id)
+                    },
+                    {
+                        $set: {
+                            role: role
+                        }
+                    }
+                );
+
+                if (result.matchedCount === 0) {
+                    return res.status(404).send({
+                        message: "User not found"
+                    });
+                }
+
+                res.send({
+                    message: `User role changed to ${role}`,
+                    modifiedCount: result.modifiedCount
+                });
+
+            } catch (error) {
+                console.error("Role update error:", error);
+
+                res.status(500).send({
+                    message: "Failed to update user role"
+                });
+            }
+        });
+
+        ///////////////// ADMIN END ///////////////////
 
 
         // BLOOD REQUESTS
