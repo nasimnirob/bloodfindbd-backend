@@ -303,18 +303,131 @@ async function run() {
             }
         });
 
-        app.get('/donors', async (req, res) => {
+        // Update User Current Location
+
+        app.patch('/users/:email/location', async (req, res) => {
             try {
-                const { bloodGroup, district, search } = req.query;
+                const email = req.params.email.trim().toLowerCase();
 
-                const query = { available: true };
-                if (bloodGroup) query.bloodGroup = bloodGroup;
-                if (district) query.district = district;
+                const { lat, lng, area, district, locationName } = req.body;
 
+                // Validate latitude and longitude
+                if (
+                    typeof lat !== "number" ||
+                    typeof lng !== "number" ||
+                    lat < -90 ||
+                    lat > 90 ||
+                    lng < -180 ||
+                    lng > 180
+                ) {
+                    return res.status(400).send({
+                        message: "Valid latitude and longitude are required"
+                    });
+                }
+
+                const result = await usersCollection.updateOne(
+                    { email },
+                    {
+                        $set: {
+                            location: {
+                                lat,
+                                lng
+                            },
+                            area: area || "",
+                            district: district || "",
+                            locationName: locationName || "",
+                            locationUpdatedAt: new Date()
+                        }
+                    }
+                );
+
+                if (result.matchedCount === 0) {
+                    return res.status(404).send({
+                        message: "User not found"
+                    });
+                }
+
+                res.send({
+                    message: "Current location updated successfully",
+                    modifiedCount: result.modifiedCount
+                });
+
+            } catch (error) {
+                console.error("Location update error:", error);
+
+                res.status(500).send({
+                    message: "Failed to update current location"
+                });
+            }
+        });
+
+        // app.get('/donors', async (req, res) => {
+        //     try {
+        //         const { bloodGroup, district, search } = req.query;
+
+        //         const query = { available: true };
+        //         if (bloodGroup) query.bloodGroup = bloodGroup;
+        //         if (district) query.district = district;
+
+
+        //         if (search) {
+        //             const escaped = search.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        //             const regex = new RegExp(escaped, "i");
+        //             query.$or = [
+        //                 { name: regex },
+        //                 { district: regex },
+        //                 { area: regex },
+        //                 { bloodGroup: regex },
+        //             ];
+        //         }
+
+        //         const donors = await usersCollection
+        //             .find(query)
+        //             .project({ email: 1, name: 1, phone: 1, bloodGroup: 1, district: 1, area: 1, photoURL: 1 })
+        //             .limit(50)
+        //             .toArray();
+
+        //         res.send(donors);
+        //     } catch (err) {
+        //         console.error(err);
+        //         res.status(500).send({ message: "Failed to fetch donors" });
+        //     }
+        // });
+
+
+        // user post count
+
+
+        app.get("/donors", async (req, res) => {
+            try {
+                const {
+                    bloodGroup,
+                    district,
+                    search,
+                    lat,
+                    lng,
+                    radius = 50,
+                } = req.query;
+
+                const query = {
+                    available: true,
+                };
+
+                if (bloodGroup) {
+                    query.bloodGroup = bloodGroup;
+                }
+
+                if (district) {
+                    query.district = district;
+                }
 
                 if (search) {
-                    const escaped = search.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+                    const escaped = search
+                        .trim()
+                        .replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
                     const regex = new RegExp(escaped, "i");
+
                     query.$or = [
                         { name: regex },
                         { district: regex },
@@ -325,19 +438,116 @@ async function run() {
 
                 const donors = await usersCollection
                     .find(query)
-                    .project({ email: 1, name: 1, phone: 1, bloodGroup: 1, district: 1, area: 1, photoURL: 1 })
-                    .limit(50)
+                    .project({
+                        email: 1,
+                        name: 1,
+                        phone: 1,
+                        bloodGroup: 1,
+                        district: 1,
+                        area: 1,
+                        photoURL: 1,
+                        location: 1,
+                    })
+                    .limit(200)
                     .toArray();
 
+                // Near Me filtering
+
+                if (lat && lng) {
+                    const userLat = Number(lat);
+                    const userLng = Number(lng);
+                    const maxRadius = Number(radius);
+
+                    if (
+                        Number.isNaN(userLat) ||
+                        Number.isNaN(userLng)
+                    ) {
+                        return res.status(400).send({
+                            message: "Invalid location",
+                        });
+                    }
+
+                    const toRadians = (degree) =>
+                        (degree * Math.PI) / 180;
+
+                    const calculateDistance = (
+                        lat1,
+                        lng1,
+                        lat2,
+                        lng2
+                    ) => {
+                        const earthRadius = 6371;
+
+                        const dLat = toRadians(lat2 - lat1);
+                        const dLng = toRadians(lng2 - lng1);
+
+                        const a =
+                            Math.sin(dLat / 2) *
+                            Math.sin(dLat / 2) +
+                            Math.cos(toRadians(lat1)) *
+                            Math.cos(toRadians(lat2)) *
+                            Math.sin(dLng / 2) *
+                            Math.sin(dLng / 2);
+
+                        const c =
+                            2 *
+                            Math.atan2(
+                                Math.sqrt(a),
+                                Math.sqrt(1 - a)
+                            );
+
+                        return earthRadius * c;
+                    };
+
+                    const nearbyDonors = donors
+                        .map((donor) => {
+                            const donorLat = donor.location?.lat;
+                            const donorLng = donor.location?.lng;
+
+                            if (
+                                typeof donorLat !== "number" ||
+                                typeof donorLng !== "number"
+                            ) {
+                                return null;
+                            }
+
+                            const distance = calculateDistance(
+                                userLat,
+                                userLng,
+                                donorLat,
+                                donorLng
+                            );
+
+                            return {
+                                ...donor,
+                                distance: Number(
+                                    distance.toFixed(2)
+                                ),
+                            };
+                        })
+                        .filter(
+                            (donor) =>
+                                donor &&
+                                donor.distance <= maxRadius
+                        )
+                        .sort(
+                            (a, b) =>
+                                a.distance - b.distance
+                        );
+
+                    return res.send(nearbyDonors);
+                }
+
+                // Normal donor search
                 res.send(donors);
             } catch (err) {
                 console.error(err);
-                res.status(500).send({ message: "Failed to fetch donors" });
+
+                res.status(500).send({
+                    message: "Failed to fetch donors",
+                });
             }
         });
-
-
-        // user post count
 
         app.get('/users/:email/post-count', async (req, res) => {
             try {
